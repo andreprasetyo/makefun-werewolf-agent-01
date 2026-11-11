@@ -1,3 +1,4 @@
+// A robust, zero-model algorithmic Werewolf player computing actions deterministically.
 // werewolf-agent-01 — pure-code deterministic player (no model calls).
 //
 // Plays 30 games of 8-player Werewolf through the env at MAKEFUN_ENV_URL:
@@ -371,6 +372,7 @@ function decideKill(view: View, a: Analysis, options: Seat[], rng: () => number)
   return { target: pick };
 }
 
+
 function decideProtect(view: View, a: Analysis, options: Seat[], rng: () => number): { target: Seat | null } {
   // Protect the revealed seer first, else the most valuable villager: a
   // vocal leader who has been pushing on wolves. Never ourselves and never
@@ -390,6 +392,8 @@ function decideProtect(view: View, a: Analysis, options: Seat[], rng: () => numb
   const pick = bestBy(pool, value, rng);
   return { target: pick };
 }
+
+// Strategic doctor protection prioritizes critical village assets while avoiding repetition.
 
 function decideInspect(view: View, a: Analysis, options: Seat[], rng: () => number): { target: Seat | null } {
   // Inspect the most suspicious living seat we do not already know.
