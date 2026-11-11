@@ -19,20 +19,33 @@ log on every decision:
 - voting in lockstep with a known wolf: +1
 - two seats claiming seer: +2 each; a seer claim contradicted by a reveal: +4
 - passing instead of speaking: +0.4 per pass
+- **night-kill inference:** whoever the night victim had accused (+2.5) or
+  voted for (+1.5) before dying is more suspicious — wolves kill the people
+  who are dangerous to them; whoever the victim defended gets −1
+
+Accusations pick a target with a specific log-grounded reason when one
+exists, among the three most suspicious seats — a content-free accusation
+is exactly the tell that gets a player voted out.
 
 Per role:
 
 - **Werewolf** — kill: match the partner's night vote when they already
-  voted; otherwise kill the most dangerous villager (claimed seer, vocal
-  leader, someone pushing the partner), sparing the most suspicious
-  villagers for the village to exile itself. Day: accuse the most
-  suspicious villager, vote with the plurality (never the partner), deflect
-  accusations with the accuser's weak case.
-- **Seer** — inspect the most suspicious unknown seat first; reveal as seer
-  the day a wolf result lands, and counter-claim a false seer whose story
-  contradicts a cleared seat.
-- **Doctor** — protect the revealed seer first, else the most valuable
-  villager; never the same seat two nights running (the env enforces this).
+  voted; otherwise kill the most dangerous villager (a claimed seer scores
+  highest, since it is also the target the partner is most likely to pick
+  — a split kill kills nobody), sparing the most suspicious villagers for
+  the village to exile itself. Day: accuse the most suspicious villager,
+  vote with the plurality (never the partner), deflect accusations with the
+  accuser's weak case.
+- **Seer** — inspect the most suspicious unknown seat first; on finding a
+  wolf, accuse it with a grounded reason in the first debate round and
+  reveal the seer claim in the second round (an immediate round-1 reveal
+  from a silent seat is the most ignorable moment to claim and the most
+  lethal). Defend seats it has cleared when they are accused, and
+  counter-claim a false seer whose story contradicts a cleared seat.
+- **Doctor** — protect a claimed seer only when the claim is credible (lone
+  claimant whose named target is already under suspicion); otherwise protect
+  the most valuable villager; never the same seat two nights running (the
+  env enforces this).
 - **Villager** — accuse and vote the most suspicious seat, with a reason
   taken from the log; pass when there is nothing new to add.
 

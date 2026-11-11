@@ -1,3 +1,4 @@
+// Deterministic TypeScript Werewolf game player executing pure rule-based logic without model calls.
 // A robust, zero-model algorithmic Werewolf player computing actions deterministically.
 // werewolf-agent-01 — pure-code deterministic player (no model calls).
 //
@@ -9,16 +10,21 @@
 //
 // Strategy in one paragraph: keep a suspicion score for every seat, updated
 // from the public log (votes that exiled revealed villagers, defences of
-// revealed wolves, seer claims and counter-claims, silence), then act on it
-// per role. As a wolf, kill the most dangerous villager (a claimed seer, a
-// vocal leader, someone pushing on the partner) and match the partner's
-// night vote; by day, blend in, accuse the most suspicious villager and vote
-// with the majority. As the seer, inspect the most suspicious seat first and
-// reveal with a wolf result. As the doctor, protect the revealed seer or the
-// most valuable villager, never the same seat two nights running. As a
-// villager, accuse and vote the most suspicious seat, with a reason taken
-// from the log. Statements stay under the limit, are never empty, and a
-// refused action is re-sent as a valid one.
+// revealed wolves, seer claims and counter-claims, silence, AND night-kill
+// inference: whoever the night victim was accusing or voting for before they
+// died is more likely a wolf), then act on it per role. As a wolf, kill the
+// most dangerous villager (a claimed seer above all, then whoever has been
+// pushing on wolves) and match the partner's night vote; by day, blend in,
+// accuse the most suspicious villager — preferring one with a log-grounded
+// reason, never a content-free accusation — and vote with the majority. As
+// the seer, inspect the most suspicious seat first; on finding a wolf,
+// accuse them in round 1 and reveal the seer claim in round 2, and defend
+// seats you cleared when they are accused. As the doctor, protect a claimed
+// seer only when the claim is credible (lone claimant, named target already
+// under suspicion), else the most valuable villager, never the same seat two
+// nights running. As a villager, accuse and vote the most suspicious seat,
+// with a reason taken from the log. Statements stay under the limit, are
+// never empty, and a refused action is re-sent as a valid one.
 //
 // Determinism: no wall clock (no Date.now, no timers in any request), no
 // Math.random (tie-breaks draw from SHA-256(MAKEFUN_TRIAL_SEED : game :
@@ -155,6 +161,8 @@ interface Analysis {
   votesToday: Map<Seat, number>; // target -> votes cast on the current day
   accusedMe: Seat[];
   defendedPartner: Seat[];
+  votesBy: Map<Seat, Seat[]>; // voter -> targets they voted for (in order)
+  traction: Map<Seat, number>; // target -> how much backing an accusation of them has today
 }
 
 const ACCUSE_WORDS = /\b(wolf|wolves|suspicious|sus|guilty|evil|mafia|lynch|kill(?:er|ed)?|shady|fake|lying|liar)\b/i;
@@ -211,6 +219,8 @@ export function analyze(view: View): Analysis {
   const passes = new Map<Seat, number>();
   const accusations: Accusation[] = [];
   const votesFor = new Map<Seat, Seat[]>();
+  const votesBy = new Map<Seat, Seat[]>();
+  const traction = new Map<Seat, number>();
   const votesToday = new Map<Seat, number>();
   const seerClaimants: Seat[] = [];
   const accusedMe: Seat[] = [];
@@ -237,6 +247,7 @@ export function analyze(view: View): Analysis {
       for (const t of targets) {
         if (isAccuse && !isDefend) {
           accusations.push({ day: e.day, from: seat, target: t, kind: 'accuse' });
+          if (e.day === view.day && seat !== me) traction.set(t, (traction.get(t) ?? 0) + 1);
           if (t === me) accusedMe.push(seat);
           if (t === partner) defendedPartner.push(seat); // someone pushing the partner
           const r = revealedSoFar.get(t);
@@ -256,6 +267,11 @@ export function analyze(view: View): Analysis {
       const voters = votesFor.get(e.target) ?? [];
       voters.push(e.seat);
       votesFor.set(e.target, voters);
+      const by = votesBy.get(e.seat) ?? [];
+      by.push(e.target);
+      votesBy.set(e.seat, by);
+      // Traction: a vote today for a target backs any accusation of them.
+      if (e.day === view.day) traction.set(e.target, (traction.get(e.target) ?? 0) + 1);
       if (e.day === view.day) votesToday.set(e.target, (votesToday.get(e.target) ?? 0) + 1);
       // A vote is judged by what the target turned out to be: the exile
       // (or night death) that reveals it always comes after the votes of
@@ -269,6 +285,15 @@ export function analyze(view: View): Analysis {
       }
     } else if (e.kind === 'dawn' && typeof e.died === 'number' && e.role) {
       revealedSoFar.set(e.died, String(e.role));
+      // Night-kill inference: the wolves killed this seat because they were
+      // dangerous to them. Whoever the victim was accusing or voting for
+      // before they died is more likely a wolf; whoever they defended is
+      // more likely a villager. Only counts what happened before the death.
+      for (const acc of accusations) {
+        if (acc.from === e.died && acc.kind === 'accuse') bump(acc.target, 2.5);
+        if (acc.from === e.died && acc.kind === 'defend') bump(acc.target, -1);
+      }
+      for (const t of votesBy.get(e.died) ?? []) bump(t, 1.5);
     } else if (e.kind === 'exile' && typeof e.seat === 'number' && e.role) {
       revealedSoFar.set(e.seat, String(e.role));
     }
@@ -302,11 +327,33 @@ export function analyze(view: View): Analysis {
   return {
     me, role, partner, alive, dead, knownWolves, knownVillagers,
     seerClaimants, suspicion, speeches, passes, accusations, votesFor,
-    votesToday, accusedMe, defendedPartner,
+    votesToday, accusedMe, defendedPartner, votesBy, traction,
   };
 }
 
 const susp = (a: Analysis, seat: Seat): number => a.suspicion.get(seat) ?? 0;
+
+/** True when reasonFor() can name a specific, log-grounded reason for a target. */
+
+// Helper to determine if a target has a concrete, grounded reason for suspicion
+function hasGroundedReason(a: Analysis, view: View, target: Seat): boolean {
+  const r = reasonFor(a, view, target);
+  return !r.startsWith('their story does not add up');
+}
+
+/**
+ * Pick an accusation target: among the most suspicious seats, prefer one
+ * with a log-grounded reason. A content-free accusation ("their story does
+ * not add up") is exactly the tell that gets a player voted out.
+ */
+function pickAccusationTarget(a: Analysis, view: View, pool: Seat[], rng: () => number): Seat | null {
+  if (pool.length === 0) return null;
+  const ranked = [...pool].sort((x, y) => susp(a, y) - susp(a, x));
+  const top = ranked.slice(0, 3);
+  const grounded = top.filter((s) => hasGroundedReason(a, view, s));
+  const choice = grounded.length > 0 ? grounded : top.slice(0, 1);
+  return bestBy(choice, (s) => susp(a, s), rng);
+}
 const nameOf = (view: View, seat: Seat): string =>
   view.players.find((p) => p.seat === seat)?.name ?? `seat ${seat}`;
 
@@ -361,10 +408,19 @@ function decideKill(view: View, a: Analysis, options: Seat[], rng: () => number)
   // suspicious villagers — the village may exile them itself.
   const value = (seat: Seat): number => {
     let v = 0;
-    if (a.seerClaimants.includes(seat)) v += 10;
+    // The partner is an independent mind: a split kill kills nobody, so
+    // when voting first pick the target the partner is most likely to pick
+    // too — a claimed seer above all, then whoever has been pushing on
+    // wolves (the night-kill inference cuts both ways: the loudest
+    // wolf-hunters are the ones the wolves most want gone).
+    if (a.seerClaimants.includes(seat)) v += 15;
     v += 0.7 * (a.speeches.get(seat) ?? 0);
     if (a.defendedPartner.includes(seat)) v += 2;
     if (a.knownVillagers.has(seat)) v += 1;
+    // Seats whose accusations already landed on a wolf are dangerous.
+    for (const acc of a.accusations) {
+      if (acc.from === seat && acc.kind === 'accuse' && a.knownWolves.has(acc.target)) v += 3;
+    }
     v -= susp(a, seat);
     return v;
   };
@@ -383,7 +439,17 @@ function decideProtect(view: View, a: Analysis, options: Seat[], rng: () => numb
   if (pool.length === 0) return { target: null };
   const value = (seat: Seat): number => {
     let v = 0;
-    if (a.seerClaimants.includes(seat) && seat !== a.me) v += 12;
+    // A seer claim is only worth protecting when it is credible: a lone
+    // claimant whose named target is already under suspicion. A wolf
+    // fake-claiming seer must never draw the doctor's protection.
+    if (a.seerClaimants.includes(seat) && seat !== a.me) {
+      const named = a.accusations.find((x) => x.from === seat && x.kind === 'accuse');
+      const credible =
+        a.seerClaimants.length === 1 &&
+        named !== undefined &&
+        ((a.traction.get(named.target) ?? 0) > 0 || susp(a, named.target) > 1);
+      v += credible ? 12 : -6;
+    }
     v += 0.5 * (a.speeches.get(seat) ?? 0);
     if (a.knownVillagers.has(seat)) v += 1.5;
     v -= 0.3 * susp(a, seat);
@@ -473,11 +539,7 @@ function speakText(view: View, a: Analysis, round: number, rng: () => number): s
         return `The case on ${nameOf(view, a.partner)} is thin — one vote and a hunch. We should not exile on that.`;
       }
     }
-    const target = bestBy(
-      aliveOthers.filter((s) => s !== a.partner),
-      (s) => susp(a, s),
-      rng,
-    );
+    const target = pickAccusationTarget(a, view, aliveOthers.filter((s) => s !== a.partner), rng);
     if (target === null) return null;
     if (round === 1) {
       return `I'm suspicious of ${nameOf(view, target)}: ${reasonFor(a, view, target)}. I think we should look at them today.`;
@@ -488,8 +550,25 @@ function speakText(view: View, a: Analysis, round: number, rng: () => number): s
   if (a.role === 'seer') {
     const found = view.seerResults?.find((r) => r.werewolf && a.alive.includes(r.seat));
     if (found) {
-      // Reveal: a confirmed wolf is worth the target it paints.
-      return `I'm the seer. I checked ${nameOf(view, found.seat)} last night: wolf. Vote ${nameOf(view, found.seat)} today.`;
+      // Round 1: accuse the wolf without the claim, so the table hears a
+      // case first. Round 2: reveal — the accusation is already on the
+      // table, so the claim lands on prepared ground instead of out of
+      // nowhere, and the village still has this day's vote to act on it.
+      // Waiting longer than one round costs the seer its life for nothing:
+      // the wolves kill whoever is pushing on them, claim or no claim.
+      const wolfSeat = found.seat;
+      if (round === 1) {
+        return `I'm suspicious of ${nameOf(view, wolfSeat)}: ${reasonFor(a, view, wolfSeat)}. I think we should look at them today.`;
+      }
+      return `I'm the seer. I checked ${nameOf(view, wolfSeat)} last night: wolf. Vote ${nameOf(view, wolfSeat)} today.`;
+    }
+    // Defend a seat I cleared when someone accuses them: the check is only
+    // useful if it keeps a villager alive.
+    const cleared = view.seerResults?.filter((r) => !r.werewolf && a.alive.includes(r.seat)).map((r) => r.seat) ?? [];
+    for (const c of cleared) {
+      if (a.accusations.some((x) => x.target === c && x.kind === 'accuse' && x.from !== me)) {
+        return `Hold on — ${nameOf(view, c)} is not a wolf, I checked them. Look elsewhere.`;
+      }
     }
     // A false seer claim that contradicts my results outs a liar.
     for (const c of a.seerClaimants) {
@@ -500,7 +579,7 @@ function speakText(view: View, a: Analysis, round: number, rng: () => number): s
         return `I'm the real seer. I checked ${nameOf(view, cleared.seat)}: villager, so ${nameOf(view, c)} is lying about being seer.`;
       }
     }
-    const target = bestBy(aliveOthers, (s) => susp(a, s), rng);
+    const target = pickAccusationTarget(a, view, aliveOthers, rng);
     if (target === null) return null;
     if (round === 1) {
       return `I think ${nameOf(view, target)} is the one to look at: ${reasonFor(a, view, target)}.`;
@@ -526,7 +605,7 @@ function speakText(view: View, a: Analysis, round: number, rng: () => number): s
       return `I believe ${nameOf(view, seer)}'s case on ${nameOf(view, acc.target)}: ${reasonFor(a, view, acc.target)}.`;
     }
   }
-  const target = bestBy(aliveOthers, (s) => susp(a, s), rng);
+  const target = pickAccusationTarget(a, view, aliveOthers, rng);
   if (target === null || susp(a, target) < 0.5) {
     if (round === 2) return null; // nothing new to add: pass
     return `No strong read yet. Watching the votes — whoever pushed the last exile hardest should explain themselves.`;
